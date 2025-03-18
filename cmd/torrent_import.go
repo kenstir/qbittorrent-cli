@@ -38,12 +38,14 @@ func RunTorrentImport() *cobra.Command {
 		qbitDir    string
 		dryRun     bool
 		skipBackup bool
+		limit      int
 	)
 
 	command.Flags().BoolVar(&dryRun, "dry-run", false, "Run without importing anything")
 	command.Flags().StringVar(&sourceDir, "source-dir", "", "source client state dir (required)")
 	command.Flags().StringVar(&qbitDir, "qbit-dir", "", "qBittorrent BT_backup dir. Commonly ~/.local/share/qBittorrent/BT_backup (required)")
 	command.Flags().BoolVar(&skipBackup, "skip-backup", false, "Skip backup before import")
+	command.Flags().IntVar(&limit, "limit", 0, "Stop after N torrents imported")
 
 	command.MarkFlagRequired("source-dir")
 	command.MarkFlagRequired("qbit-dir")
@@ -119,6 +121,7 @@ func RunTorrentImport() *cobra.Command {
 			SourceDir: sourceDir,
 			QbitDir:   qbitDir,
 			DryRun:    dryRun,
+			Limit:     limit,
 		}
 
 		if err := imp.Import(opts); err != nil {
