@@ -17,6 +17,7 @@ type Options struct {
 	SourceDir string
 	QbitDir   string
 	DryRun    bool
+	Limit     int
 }
 
 type Importer interface {
@@ -71,8 +72,10 @@ func (di *DelugeImport) Import(opts Options) error {
 	log.Printf("Total torrents to process: %d\n", totalJobs)
 
 	positionNum := 0
+	numImported := 0
 	for torrentID, value := range fastresumeFile {
 		torrentNamePath := filepath.Join(sourceDir, torrentID+".torrent")
+		torrentNamePathBak := filepath.Join(sourceDir, torrentID+".torrent.bak")
 
 		// If a file exist in fastresume data but no .torrent file, skip
 		if _, err = os.Stat(torrentNamePath); os.IsNotExist(err) {
@@ -158,10 +161,20 @@ func (di *DelugeImport) Import(opts Options) error {
 			return err
 		}
 
+		// Renaming the torrent file to .bak causes Deluge to skip the torrent when it restarts,
+		// after which it will be removed from the .fastresume file.
+		if err = os.Rename(torrentNamePath, torrentNamePathBak); err != nil {
+			log.Printf("Could not move %s to %s error %q, continuing\n", torrentNamePath, torrentNamePathBak, err)
+		}
+
+		numImported++
 		log.Printf("(%d/%d) successfully imported: %s %s\n", positionNum, totalJobs, torrentID, metaInfo.Name)
+		if (opts.Limit > 0) && (numImported >= opts.Limit) {
+			break
+		}
 	}
 
-	log.Printf("(%d/%d) successfully imported torrents!\n", positionNum, totalJobs)
+	log.Printf("(%d/%d) successfully imported %d torrents!\n", positionNum, totalJobs, numImported)
 
 	return nil
 }

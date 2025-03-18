@@ -1,8 +1,11 @@
 .idea
 .vagrant
+.vscode
 .DS_Store
 .qbt.toml
 .devcontainer
 dist
 bin
-testdata
+/qbt.exe
+/test/export/
+/test/output/
