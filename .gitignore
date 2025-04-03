@@ -6,6 +6,5 @@
 .devcontainer
 dist
 bin
-/qbt.exe
 /test/export/
 /test/output/
