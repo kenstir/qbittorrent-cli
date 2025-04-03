@@ -39,6 +39,7 @@ func RunTorrentImport() *cobra.Command {
 		dryRun     bool
 		skipBackup bool
 		limit      int
+		hashes     []string
 	)
 
 	command.Flags().BoolVar(&dryRun, "dry-run", false, "Run without importing anything")
@@ -46,6 +47,7 @@ func RunTorrentImport() *cobra.Command {
 	command.Flags().StringVar(&qbitDir, "qbit-dir", "", "qBittorrent BT_backup dir. Commonly ~/.local/share/qBittorrent/BT_backup (required)")
 	command.Flags().BoolVar(&skipBackup, "skip-backup", false, "Skip backup before import")
 	command.Flags().IntVar(&limit, "limit", 0, "Stop after N torrents imported")
+	command.Flags().StringSliceVar(&hashes, "hashes", []string{}, "Filter by hashes. Separated by comma: \"hash1,hash2\".")
 
 	command.MarkFlagRequired("source-dir")
 	command.MarkFlagRequired("qbit-dir")
@@ -67,6 +69,8 @@ func RunTorrentImport() *cobra.Command {
 		}
 
 		// TODO check if program is running, if true exit
+
+		// TODO check if qbittorrent is keeping resume data in sqlite, if true exit
 
 		// Backup data before running
 		if !skipBackup {
@@ -122,6 +126,7 @@ func RunTorrentImport() *cobra.Command {
 			QbitDir:   qbitDir,
 			DryRun:    dryRun,
 			Limit:     limit,
+			Hashes:    hashes,
 		}
 
 		if err := imp.Import(opts); err != nil {

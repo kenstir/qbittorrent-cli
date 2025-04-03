@@ -7,6 +7,7 @@ import (
 
 	"github.com/ludviglundgren/qbittorrent-cli/internal/fs"
 	"github.com/ludviglundgren/qbittorrent-cli/pkg/qbittorrent"
+	"golang.org/x/exp/slices"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/pkg/errors"
@@ -18,6 +19,7 @@ type Options struct {
 	QbitDir   string
 	DryRun    bool
 	Limit     int
+	Hashes    []string
 }
 
 type Importer interface {
@@ -76,6 +78,13 @@ func (di *DelugeImport) Import(opts Options) error {
 	for torrentID, value := range fastresumeFile {
 		torrentNamePath := filepath.Join(sourceDir, torrentID+".torrent")
 		torrentNamePathBak := filepath.Join(sourceDir, torrentID+".torrent.bak")
+
+		// If hashes are provided, convert only those torrents
+		if len(opts.Hashes) > 0 {
+			if !slices.Contains(opts.Hashes, torrentID) {
+				continue
+			}
+		}
 
 		// If a file exist in fastresume data but no .torrent file, skip
 		if _, err = os.Stat(torrentNamePath); os.IsNotExist(err) {
