@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -9,7 +8,7 @@ import (
 
 	"github.com/ludviglundgren/qbittorrent-cli/internal/importer"
 
-	"github.com/mholt/archiver/v3"
+	"github.com/mholt/archives"
 	"github.com/mitchellh/go-homedir"
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -65,7 +64,7 @@ func RunTorrentImport() *cobra.Command {
 			imp = importer.NewRTorrentImporter()
 
 		default:
-			return fmt.Errorf("error: unsupported client: %s\n", source)
+			return errors.Errorf("error: unsupported client: %s", source)
 		}
 
 		// TODO check if program is running, if true exit
@@ -74,12 +73,11 @@ func RunTorrentImport() *cobra.Command {
 
 		// Backup data before running
 		if !skipBackup {
-			fmt.Print("prepare to backup torrent data before import..\n")
+			log.Print("prepare to backup torrent data before import..\n")
 
 			homeDir, err := homedir.Dir()
 			if err != nil {
-				fmt.Printf("could not find home directory: %q", err)
-				return err
+				return errors.Wrap(err, "could not find home directory")
 			}
 
 			timeStamp := time.Now().Format("20060102150405")
@@ -88,37 +86,79 @@ func RunTorrentImport() *cobra.Command {
 			qbitBackupArchive := filepath.Join(homeDir, "qbt_backup", "qBittorrent_backup_"+timeStamp+".tar.gz")
 
 			if dryRun {
-				fmt.Printf("dry-run: creating %s backup of directory: %s to %s ...\n", source, sourceDir, sourceBackupArchive)
+				log.Printf("dry-run: creating %s backup of directory: %s to %s ...\n", source, sourceDir, sourceBackupArchive)
 			} else {
-				fmt.Printf("creating %s backup of directory: %s to %s ...\n", source, sourceDir, sourceBackupArchive)
+				log.Printf("creating %s backup of directory: %s to %s ...\n", source, sourceDir, sourceBackupArchive)
 
-				if err := archiver.Archive([]string{sourceDir}, sourceBackupArchive); err != nil {
-					log.Printf("could not backup directory: %q", err)
+				// map files on disk to their paths in the archive using default settings (second arg)
+				files, err := archives.FilesFromDisk(cmd.Context(), nil, map[string]string{
+					sourceDir: "",
+				})
+				if err != nil {
 					return err
+				}
+
+				// create the output file we'll write to
+				out, err := os.Create(sourceBackupArchive)
+				if err != nil {
+					return err
+				}
+				defer out.Close()
+
+				format := archives.CompressedArchive{
+					Compression: archives.Gz{},
+					Archival:    archives.Tar{},
+				}
+
+				// create the archive
+				err = format.Archive(cmd.Context(), out, files)
+				if err != nil {
+					return errors.Wrapf(err, "could not create backup archive: %s", out.Name())
 				}
 			}
 
 			if dryRun {
-				fmt.Printf("dry-run: creating qBittorrent backup of directory: %s to %s ...\n", qbitDir, qbitBackupArchive)
+				log.Printf("dry-run: creating qBittorrent backup of directory: %s to %s ...\n", qbitDir, qbitBackupArchive)
 			} else {
-				fmt.Printf("creating qBittorrent backup of directory: %s to %s ...\n", qbitDir, qbitBackupArchive)
+				log.Printf("creating qBittorrent backup of directory: %s to %s ...\n", qbitDir, qbitBackupArchive)
 
-				if err := archiver.Archive([]string{qbitDir}, qbitBackupArchive); err != nil {
-					log.Printf("could not backup directory: %q", err)
+				// map files on disk to their paths in the archive using default settings (second arg)
+				files, err := archives.FilesFromDisk(cmd.Context(), nil, map[string]string{
+					qbitDir: "",
+				})
+				if err != nil {
 					return err
+				}
+
+				// create the output file we'll write to
+				out, err := os.Create(qbitBackupArchive)
+				if err != nil {
+					return err
+				}
+				defer out.Close()
+
+				format := archives.CompressedArchive{
+					Compression: archives.Gz{},
+					Archival:    archives.Tar{},
+				}
+
+				// create the archive
+				err = format.Archive(cmd.Context(), out, files)
+				if err != nil {
+					return errors.Wrapf(err, "could not create backup archive: %s", out.Name())
 				}
 			}
 
-			fmt.Print("Backup completed!\n")
+			log.Print("Backup completed!\n")
 		}
 
 		start := time.Now()
 
 		if dryRun {
-			fmt.Printf("dry-run: preparing to import torrents from: %s dir: %s\n", source, sourceDir)
-			fmt.Println("dry-run: no data will be written")
+			log.Printf("dry-run: preparing to import torrents from: %s dir: %s\n", source, sourceDir)
+			log.Println("dry-run: no data will be written")
 		} else {
-			fmt.Printf("preparing to import torrents from: %s dir: %s\n", source, sourceDir)
+			log.Printf("preparing to import torrents from: %s dir: %s\n", source, sourceDir)
 		}
 
 		opts := importer.Options{
@@ -130,13 +170,12 @@ func RunTorrentImport() *cobra.Command {
 		}
 
 		if err := imp.Import(opts); err != nil {
-			fmt.Printf("%s import error: %q\n", source, err)
-			os.Exit(1)
+			return errors.Wrapf(err, "could not import from %s", source)
 		}
 
 		elapsed := time.Since(start)
 
-		fmt.Printf("\nImport finished in: %s\n", elapsed)
+		log.Printf("\nImport finished in: %s\n", elapsed)
 
 		return nil
 	}

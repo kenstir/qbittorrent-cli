@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"context"
-	"errors"
-	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,7 +17,16 @@ import (
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/autobrr/go-qbittorrent"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+)
+
+type QBitStopCondition string
+
+const (
+	QBitStopConditionNone             QBitStopCondition = "None"
+	QbitStopConditionMetadataReceived QBitStopCondition = "MetadataReceived"
+	QbitStopConditionFilesChecked     QBitStopCondition = "FilesChecked"
 )
 
 // RunTorrentAdd cmd to add torrents
@@ -33,10 +42,12 @@ func RunTorrentAdd() *cobra.Command {
 		ignoreRules   bool
 		uploadLimit   uint64
 		downloadLimit uint64
+		stopCondition string
 		sleep         time.Duration
+		recheck       bool
 	)
 
-	var command = &cobra.Command{
+	command := &cobra.Command{
 		Use:   "add",
 		Short: "Add torrent(s)",
 		Long:  `Add new torrent(s) to qBittorrent from file or magnet. Supports glob pattern for files like: ./files/*.torrent`,
@@ -59,12 +70,14 @@ func RunTorrentAdd() *cobra.Command {
 	command.Flags().BoolVar(&removeStalled, "remove-stalled", false, "Remove stalled torrents from re-announce")
 	command.Flags().StringVar(&savePath, "save-path", "", "Add torrent to the specified path")
 	command.Flags().StringVar(&category, "category", "", "Add torrent to the specified category")
+	command.Flags().StringVar(&stopCondition, "stop-condition", "", "Add torrent with the specified stop condition. Possible values: None, MetadataReceived, FilesChecked. Example: --stop-condition MetadataReceived")
 	command.Flags().Uint64Var(&uploadLimit, "limit-ul", 0, "Set torrent upload speed limit. Unit in bytes/second")
 	command.Flags().Uint64Var(&downloadLimit, "limit-dl", 0, "Set torrent download speed limit. Unit in bytes/second")
 	command.Flags().DurationVar(&sleep, "sleep", 200*time.Millisecond, "Set the amount of time to wait between adding torrents in seconds")
 	command.Flags().StringArrayVar(&tags, "tags", []string{}, "Add tags to torrent")
+	command.Flags().BoolVar(&recheck, "recheck", false, "Force recheck after adding (useful when using --paused)")
 
-	command.Run = func(cmd *cobra.Command, args []string) {
+	command.RunE = func(cmd *cobra.Command, args []string) error {
 		config.InitConfig()
 		// args
 		// first arg is path to torrent file
@@ -83,31 +96,31 @@ func RunTorrentAdd() *cobra.Command {
 		ctx := cmd.Context()
 
 		if err := qb.LoginCtx(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "could not login to qbit: %q\n", err)
-			os.Exit(1)
+			return errors.Wrap(err, "could not login to qbit")
 		}
 
 		if config.Rules.Enabled && !ignoreRules {
 			activeDownloads, err := qb.GetTorrentsCtx(ctx, qbittorrent.TorrentFilterOptions{Filter: qbittorrent.TorrentFilterDownloading})
 			if err != nil {
-				log.Fatalf("could not fetch torrents: %q\n", err)
+				return errors.Wrap(err, "could not fetch torrents")
 			}
 
 			if len(activeDownloads) >= config.Rules.MaxActiveDownloads {
 				log.Printf("max active downloads of (%d) reached, skip adding\n", config.Rules.MaxActiveDownloads)
-				return
+				return nil
 			}
 		}
 
 		options := map[string]string{}
 		if paused {
 			options["paused"] = "true"
+			options["stopped"] = "true"
 		}
 		if skipHashCheck {
 			options["skip_checking"] = "true"
 		}
 		if savePath != "" {
-			//options["savepath"] = savePath
+			// options["savepath"] = savePath
 			options["autoTMM"] = "false"
 		}
 		if category != "" {
@@ -115,6 +128,9 @@ func RunTorrentAdd() *cobra.Command {
 		}
 		if tags != nil {
 			options["tags"] = strings.Join(tags, ",")
+		}
+		if stopCondition != "" && (stopCondition == string(QBitStopConditionNone) || stopCondition == string(QbitStopConditionMetadataReceived) || stopCondition == string(QbitStopConditionFilesChecked)) {
+			options["stop_condition"] = stopCondition
 		}
 		if uploadLimit > 0 {
 			options["upLimit"] = strconv.FormatUint(uploadLimit, 10)
@@ -127,11 +143,11 @@ func RunTorrentAdd() *cobra.Command {
 			if dry {
 				log.Printf("dry-run: successfully added torrent from magnet %s!\n", filePath)
 
-				return
+				return nil
 			}
 
 			if err := qb.AddTorrentFromUrlCtx(ctx, filePath, options); err != nil {
-				log.Fatalf("adding torrent failed: %q\n", err)
+				return errors.Wrapf(err, "adding torrent %s failed", filePath)
 			}
 
 			hash := ""
@@ -140,7 +156,7 @@ func RunTorrentAdd() *cobra.Command {
 			if config.Reannounce.Enabled && !paused {
 				magnet, err := metainfo.ParseMagnetUri(filePath)
 				if err != nil {
-					fmt.Printf("could not parse magnet URI: %s\n", filePath)
+					return errors.Wrapf(err, "could not parse magnet URI: %s", filePath)
 				}
 
 				hash := magnet.InfoHash.String()
@@ -159,21 +175,65 @@ func RunTorrentAdd() *cobra.Command {
 				wg.Wait()
 			}
 
+			if paused && recheck {
+				magnet, err := metainfo.ParseMagnetUri(filePath)
+				if err == nil {
+					hash = magnet.InfoHash.String()
+					if err := qb.RecheckCtx(ctx, []string{hash}); err != nil {
+						log.Printf("could not recheck torrent: %s err: %q\n", hash, err)
+					} else {
+						log.Printf("rechecked torrent: %s\n", hash)
+					}
+				}
+			}
+
 			log.Printf("successfully added torrent from magnet: %s %s\n", filePath, hash)
-			return
+			return nil
 		} else {
 			var files []string
 			var err error
 
-			if IsGlobPattern(filePath) {
+			var tempFile *os.File
+
+			defer func() {
+				if tempFile != nil {
+					os.Remove(tempFile.Name())
+					tempFile.Close()
+				}
+			}()
+
+			if strings.HasPrefix(filePath, "https://") || strings.HasPrefix(filePath, "http://") {
+				tempFile, err = os.CreateTemp("", "qbt-torrent-dl")
+				if err != nil {
+					return errors.Wrap(err, "could not create tmp file")
+				}
+
+				response, err := http.Get(filePath)
+				if err != nil {
+					return errors.Wrapf(err, "could not download file: %s", filePath)
+				}
+
+				defer response.Body.Close()
+
+				if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated && response.StatusCode != http.StatusNoContent {
+					return errors.Errorf("unexpected status: %d", response.StatusCode)
+				}
+
+				_, err = io.Copy(tempFile, response.Body)
+				if err != nil {
+					return errors.Wrap(err, "could not write download locally")
+				}
+
+				files = []string{tempFile.Name()}
+			} else if IsGlobPattern(filePath) {
 				files, err = filepath.Glob(filePath)
 				if err != nil {
-					log.Fatalf("could not find files matching: %s err: %q\n", filePath, err)
+					return errors.Wrapf(err, "could not find files matching: %s", filePath)
 				}
 			} else {
 				_, err := os.Lstat(filePath)
 				if err != nil {
-					log.Fatalf("could not stat file: %q\n", err)
+					return errors.Wrapf(err, "could not find file: %s", filePath)
 				}
 
 				files = []string{filePath}
@@ -181,7 +241,7 @@ func RunTorrentAdd() *cobra.Command {
 
 			if len(files) == 0 {
 				log.Printf("found 0 torrents matching %s\n", filePath)
-				return
+				return nil
 			}
 
 			log.Printf("found (%d) torrent(s) to add\n", len(files))
@@ -200,17 +260,25 @@ func RunTorrentAdd() *cobra.Command {
 				options["savepath"] = savePath
 
 				if err := qb.AddTorrentFromFileCtx(ctx, file, options); err != nil {
-					log.Fatalf("adding torrent failed: %q\n", err)
+					return errors.Wrapf(err, "could not add torrent: %s", file)
 				}
 
 				// Get meta info from file to find out the hash for later use
 				t, err := metainfo.LoadFromFile(file)
 				if err != nil {
-					fmt.Printf("could not open file: %s", file)
+					log.Printf("could not open file: %s", file)
 					continue
 				}
 
 				hash := t.HashInfoBytes().String()
+
+				if paused && recheck {
+					if err := qb.RecheckCtx(ctx, []string{hash}); err != nil {
+						log.Printf("could not recheck torrent: %s err: %q\n", hash, err)
+					} else {
+						log.Printf("rechecked torrent: %s\n", hash)
+					}
+				}
 
 				// some trackers are bugged or slow, so we need to re-announce the torrent until it works
 				if config.Reannounce.Enabled && !paused {
@@ -242,6 +310,8 @@ func RunTorrentAdd() *cobra.Command {
 
 			log.Printf("successfully added %d torrent(s)\n", success)
 		}
+
+		return nil
 	}
 
 	return command
